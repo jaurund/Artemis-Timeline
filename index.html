@@ -459,6 +459,10 @@
     min-height: 0;
     max-height: 100%;
   }
+  .meta-panel.traj-expanded-panel {
+    width: 420px;
+    flex-basis: 420px;
+  }
   .meta-section {
     padding: 12px;
     background: rgba(0,0,0,0.25);
@@ -496,11 +500,51 @@
     border: 1px solid #1a1a2e;
     padding: 6px;
     text-align: center;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .traj-section.traj-expanded {
+    border-color: rgba(79,195,247,0.45);
+    background: rgba(0,0,0,0.5);
   }
   .traj-section canvas {
     width: 100%;
     height: auto;
     display: block;
+    cursor: pointer;
+    touch-action: manipulation;
+  }
+  .traj-section.traj-expanded canvas {
+    cursor: crosshair;
+    touch-action: none;
+  }
+  .traj-section.traj-scrubbing canvas {
+    cursor: grabbing;
+  }
+  .traj-collapse-btn {
+    display: none;
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    width: 28px;
+    height: 28px;
+    border: 1px solid rgba(255,255,255,0.16);
+    border-radius: 50%;
+    background: rgba(0,0,0,0.55);
+    color: #ddd;
+    cursor: pointer;
+    font-size: 18px;
+    line-height: 1;
+    z-index: 2;
+  }
+  .traj-section.traj-expanded .traj-collapse-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .traj-collapse-btn:hover {
+    color: #fff;
+    border-color: rgba(79,195,247,0.45);
+    background: rgba(0,0,0,0.8);
   }
   .traj-label {
     color: #888;
@@ -1115,6 +1159,10 @@
       /* default = middle */
       top: calc(var(--vh) - var(--sheet-middle-h));
     }
+    .meta-panel.traj-expanded-panel {
+      width: 100%;
+      flex-basis: auto;
+    }
     .meta-panel.sheet-open    { top: 35vh; }
     .meta-panel.sheet-middle  { top: calc(var(--vh) - var(--sheet-middle-h)); }
     .meta-panel.sheet-closed  { top: calc(var(--vh) - var(--sheet-handle-h) - var(--safe-bottom)); overflow-y: hidden; }
@@ -1181,12 +1229,23 @@
       max-height: 140px;
       overflow: hidden;
     }
+    .traj-section.traj-expanded {
+      max-height: min(48vh, 360px);
+      border-bottom: 1px solid #1a1a2e;
+    }
     .traj-section canvas {
       border-radius: 14px 14px 0 0;
       width: 100%;
       height: 122px; /* leaves room for the trajectory label, total ≤140px */
       object-fit: contain;
       display: block;
+    }
+    .traj-section.traj-expanded canvas {
+      height: auto;
+    }
+    .traj-collapse-btn {
+      top: 52px;
+      right: 10px;
     }
     .traj-label { padding-bottom: 4px; }
     .meta-panel > .calendar-promo { order: 2; margin: 10px 12px 0; flex-shrink: 0; }
@@ -1325,6 +1384,7 @@
       <div class="sheet-handle-title" id="sheetHandleTitle">Show More Information</div>
     </div>
     <div class="traj-section">
+      <button class="traj-collapse-btn" id="trajCollapseBtn" type="button" title="Collapse trajectory" aria-label="Collapse trajectory">&times;</button>
       <canvas id="trajCanvas" width="400" height="200"></canvas>
       <div class="traj-label" id="trajLabel"></div>
     </div>
@@ -2286,22 +2346,21 @@ function getMoonDistKm(ts) {
   return Math.sqrt(dx*dx + dy*dy);
 }
 
-function drawTrajectory(ts) {
-  const canvas = document.getElementById('trajCanvas');
-  if (!canvas) return;
-  const dpr = window.devicePixelRatio || 1;
-  const rect = canvas.getBoundingClientRect();
-  const W = rect.width;
-  const H = Math.round(W * 0.32); // wide & short
-  canvas.width = W * dpr;
-  canvas.height = H * dpr;
-  canvas.style.height = H + 'px';
-  const ctx = canvas.getContext('2d');
-  ctx.scale(dpr, dpr);
-  ctx.clearRect(0, 0, W, H);
+const TRAJ_END = TRAJ_START + (TRAJ_SC.length - 1) * TRAJ_STEP_SC;
+let trajectoryExpanded = false;
+let trajectoryCanvasPoints = [];
 
-  // Bounds from spacecraft trajectory + Earth only (ignore Moon arc extent)
-  const pad = 12;
+function getTrajectoryCanvasHeight(width) {
+  if (!trajectoryExpanded) return Math.round(width * 0.32);
+  const isMobile = window.innerWidth <= 768;
+  if (!isMobile) return Math.round(width * 0.5);
+  const ratio = 0.66;
+  const maxHeight = Math.min(window.innerHeight * 0.42, 340);
+  return Math.round(Math.max(width * 0.32, Math.min(width * ratio, maxHeight)));
+}
+
+function buildTrajectoryTransform(W, H) {
+  const pad = trajectoryExpanded ? 18 : 12;
   const allPts = TRAJ_SC.concat([[0,0]]);
   let minRX = Infinity, maxRX = -Infinity, minRY = Infinity, maxRY = -Infinity;
   for (const p of allPts) {
@@ -2309,21 +2368,76 @@ function drawTrajectory(ts) {
     if (rx < minRX) minRX = rx; if (rx > maxRX) maxRX = rx;
     if (ry < minRY) minRY = ry; if (ry > maxRY) maxRY = ry;
   }
-  // Add padding to Y range so the thin trajectory isn't cramped
   const rw = (maxRX - minRX) * 1.01;
   const ryRange = (maxRY - minRY);
-  const rh = Math.max(ryRange * 1.2, rw * 0.18); // ensure minimum height
+  const rh = Math.max(ryRange * 1.2, rw * 0.18);
   const rcx = (minRX + maxRX) / 2, rcy = (minRY + maxRY) / 2;
   const scaleX = (W - 2*pad) / rw, scaleY = (H - 2*pad) / rh;
   const scale = Math.min(scaleX, scaleY);
 
-  function toCanvas(x, y) {
-    const [rx, ry] = rotXY(x, y);
-    return [
-      W/2 + (rx - rcx) * scale,
-      H/2 - (ry - rcy) * scale
-    ];
+  return {
+    toCanvas(x, y) {
+      const [rx, ry] = rotXY(x, y);
+      return [
+        W/2 + (rx - rcx) * scale,
+        H/2 - (ry - rcy) * scale
+      ];
+    }
+  };
+}
+
+function cacheTrajectoryCanvasPoints(transform) {
+  trajectoryCanvasPoints = TRAJ_SC.map((p, i) => {
+    const [x, y] = transform.toCanvas(p[0], p[1]);
+    return { x, y, t: TRAJ_START + i * TRAJ_STEP_SC };
+  });
+}
+
+function getTrajectoryTimeFromClientPoint(clientX, clientY) {
+  const canvas = document.getElementById('trajCanvas');
+  if (!canvas || trajectoryCanvasPoints.length < 2) return null;
+  const rect = canvas.getBoundingClientRect();
+  const x = clientX - rect.left;
+  const y = clientY - rect.top;
+  let bestDist = Infinity;
+  let bestTime = trajectoryCanvasPoints[0].t;
+
+  for (let i = 1; i < trajectoryCanvasPoints.length; i++) {
+    const a = trajectoryCanvasPoints[i - 1];
+    const b = trajectoryCanvasPoints[i];
+    const vx = b.x - a.x, vy = b.y - a.y;
+    const lenSq = vx*vx + vy*vy;
+    const frac = lenSq ? Math.max(0, Math.min(1, ((x - a.x) * vx + (y - a.y) * vy) / lenSq)) : 0;
+    const px = a.x + vx * frac, py = a.y + vy * frac;
+    const dx = x - px, dy = y - py;
+    const dist = dx*dx + dy*dy;
+    if (dist < bestDist) {
+      bestDist = dist;
+      bestTime = a.t + (b.t - a.t) * frac;
+    }
   }
+
+  return Math.max(TRAJ_START, Math.min(TRAJ_END, bestTime));
+}
+
+function drawTrajectory(ts) {
+  const canvas = document.getElementById('trajCanvas');
+  if (!canvas) return;
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  const W = rect.width;
+  if (!W) return;
+  const H = getTrajectoryCanvasHeight(W);
+  canvas.width = W * dpr;
+  canvas.height = H * dpr;
+  canvas.style.height = H + 'px';
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, W, H);
+
+  const transform = buildTrajectoryTransform(W, H);
+  const toCanvas = transform.toCanvas;
+  cacheTrajectoryCanvasPoints(transform);
 
   // How far along are we
   const trajIdx = getTrajIndex(ts);
@@ -2333,8 +2447,8 @@ function drawTrajectory(ts) {
   ctx.beginPath();
   ctx.strokeStyle = 'rgba(79,195,247,0.12)';
   ctx.lineWidth = 1.5;
-  for (let i = 0; i < TRAJ_SC.length; i++) {
-    const [px, py] = toCanvas(TRAJ_SC[i][0], TRAJ_SC[i][1]);
+  for (let i = 0; i < trajectoryCanvasPoints.length; i++) {
+    const px = trajectoryCanvasPoints[i].x, py = trajectoryCanvasPoints[i].y;
     if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
   }
   ctx.stroke();
@@ -2344,8 +2458,8 @@ function drawTrajectory(ts) {
     const maxI = Math.min(completedIdx + 1, TRAJ_SC.length);
     for (let i = 1; i < maxI; i++) {
       const frac = i / TRAJ_SC.length;
-      const [x0, y0] = toCanvas(TRAJ_SC[i-1][0], TRAJ_SC[i-1][1]);
-      const [x1, y1] = toCanvas(TRAJ_SC[i][0], TRAJ_SC[i][1]);
+      const x0 = trajectoryCanvasPoints[i-1].x, y0 = trajectoryCanvasPoints[i-1].y;
+      const x1 = trajectoryCanvasPoints[i].x, y1 = trajectoryCanvasPoints[i].y;
       ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1);
       let r, g, b;
       if (frac < 0.5) { const t=frac*2; r=Math.round(79+(255-79)*t); g=Math.round(195+(255-195)*t); b=Math.round(247+(255-247)*t); }
@@ -2632,12 +2746,11 @@ function getTimelineTimeFromClientX(clientX) {
   return viewStart + (viewEnd - viewStart) * frac;
 }
 
-function jumpToNearestPhotoForClientX(clientX) {
+function jumpToNearestPhotoForTime(targetTime, autoPanTimeline) {
   if (!filteredPhotos.length) return;
-  const clickTime = getTimelineTimeFromClientX(clientX);
   let best = 0, bestDist = Infinity;
   filteredPhotos.forEach((p, i) => {
-    const d = Math.abs(p.t - clickTime);
+    const d = Math.abs(p.t - targetTime);
     if (d < bestDist) { bestDist = d; best = i; }
   });
   if (currentPhotoIdx !== best) {
@@ -2646,7 +2759,7 @@ function jumpToNearestPhotoForClientX(clientX) {
     // Auto-pan the view when scrubbing reaches the edge while zoomed in
     const span = viewEnd - viewStart;
     const fullSpan = T_END - T_START;
-    if (span < fullSpan * 0.95) {
+    if (autoPanTimeline && span < fullSpan * 0.95) {
       const photoT = filteredPhotos[best].t;
       const margin = span * 0.15;
       if (photoT < viewStart + margin || photoT > viewEnd - margin) {
@@ -2659,6 +2772,11 @@ function jumpToNearestPhotoForClientX(clientX) {
       }
     }
   }
+}
+
+function jumpToNearestPhotoForClientX(clientX) {
+  const clickTime = getTimelineTimeFromClientX(clientX);
+  jumpToNearestPhotoForTime(clickTime, true);
 }
 
 function isTimelineInteractiveTarget(target) {
@@ -3180,6 +3298,114 @@ function relocateDescHoverForViewport() {
   }
 }
 
+const trajCanvasEl = document.getElementById('trajCanvas');
+const trajCollapseBtnEl = document.getElementById('trajCollapseBtn');
+let activeTrajectoryPointerId = null;
+let trajectoryPointerMoved = false;
+let trajectoryStartX = 0;
+let trajectoryStartY = 0;
+
+function getCurrentPhotoTime() {
+  return filteredPhotos[currentPhotoIdx] ? filteredPhotos[currentPhotoIdx].t : T_START;
+}
+
+function setTrajectoryScrubbing(active) {
+  if (trajSectionEl) trajSectionEl.classList.toggle('traj-scrubbing', active);
+}
+
+function setTrajectoryExpanded(expanded) {
+  trajectoryExpanded = expanded;
+  if (trajSectionEl) trajSectionEl.classList.toggle('traj-expanded', expanded);
+  if (sheetEl) sheetEl.classList.toggle('traj-expanded-panel', expanded);
+  if (trajCollapseBtnEl) trajCollapseBtnEl.hidden = !expanded;
+  if (trajCanvasEl) {
+    trajCanvasEl.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+    trajCanvasEl.setAttribute('aria-label', expanded ? 'Mission trajectory. Click or drag to navigate.' : 'Expand mission trajectory');
+  }
+  if (expanded && MOBILE_MQ.matches) applySheetState('open');
+  drawTrajectory(getCurrentPhotoTime());
+}
+
+function jumpToNearestPhotoForTrajectoryPoint(clientX, clientY) {
+  const targetTime = getTrajectoryTimeFromClientPoint(clientX, clientY);
+  if (targetTime === null) return;
+  jumpToNearestPhotoForTime(targetTime, true);
+}
+
+function onTrajectoryPointerDown(e) {
+  if (e.button !== 0) return;
+  e.stopPropagation();
+  if (!trajectoryExpanded) {
+    setTrajectoryExpanded(true);
+    e.preventDefault();
+    return;
+  }
+  activeTrajectoryPointerId = e.pointerId;
+  trajectoryPointerMoved = false;
+  trajectoryStartX = e.clientX;
+  trajectoryStartY = e.clientY;
+  trajCanvasEl.setPointerCapture(e.pointerId);
+  setTrajectoryScrubbing(true);
+  e.preventDefault();
+}
+
+function onTrajectoryPointerMove(e) {
+  if (activeTrajectoryPointerId !== e.pointerId) return;
+  e.stopPropagation();
+  const dx = e.clientX - trajectoryStartX;
+  const dy = e.clientY - trajectoryStartY;
+  if (!trajectoryPointerMoved && Math.abs(dx) < 2 && Math.abs(dy) < 2) return;
+  trajectoryPointerMoved = true;
+  jumpToNearestPhotoForTrajectoryPoint(e.clientX, e.clientY);
+  e.preventDefault();
+}
+
+function finishTrajectoryPointer(e) {
+  if (activeTrajectoryPointerId !== e.pointerId) return;
+  e.stopPropagation();
+  if (!trajectoryPointerMoved && e.type !== 'pointercancel') {
+    jumpToNearestPhotoForTrajectoryPoint(e.clientX, e.clientY);
+  }
+  if (trajCanvasEl.hasPointerCapture(e.pointerId)) {
+    trajCanvasEl.releasePointerCapture(e.pointerId);
+  }
+  activeTrajectoryPointerId = null;
+  setTrajectoryScrubbing(false);
+  e.preventDefault();
+}
+
+if (trajCanvasEl) {
+  trajCanvasEl.tabIndex = 0;
+  trajCanvasEl.setAttribute('role', 'button');
+  trajCanvasEl.addEventListener('pointerdown', onTrajectoryPointerDown);
+  trajCanvasEl.addEventListener('pointermove', onTrajectoryPointerMove);
+  trajCanvasEl.addEventListener('pointerup', finishTrajectoryPointer);
+  trajCanvasEl.addEventListener('pointercancel', finishTrajectoryPointer);
+  trajCanvasEl.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && trajectoryExpanded) {
+      setTrajectoryExpanded(false);
+      e.preventDefault();
+    } else if ((e.key === 'Enter' || e.key === ' ') && !trajectoryExpanded) {
+      setTrajectoryExpanded(true);
+      e.preventDefault();
+    }
+  });
+}
+
+if (trajCollapseBtnEl) {
+  trajCollapseBtnEl.hidden = true;
+  trajCollapseBtnEl.addEventListener('click', e => {
+    e.stopPropagation();
+    setTrajectoryExpanded(false);
+  });
+}
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && trajectoryExpanded) setTrajectoryExpanded(false);
+});
+
+setTrajectoryExpanded(false);
+
 // --- Drag/snap interaction ---
 let dragStartY = 0;
 let dragStartTop = 0;
@@ -3260,6 +3486,7 @@ function syncMobileLayout() {
     document.body.classList.remove('sheet-state-open', 'sheet-state-middle', 'sheet-state-closed');
     sheetEl.style.top = '';
   }
+  drawTrajectory(getCurrentPhotoTime());
 }
 
 syncMobileLayout();
